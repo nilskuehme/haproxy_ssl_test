@@ -12,9 +12,9 @@ To test a HAProxy OCSP updater script this docker-compose environment has been c
 * wildcard certificates and multiple certificates do work.
 
 ## Get OCSP response of certificate using HAProxy
-`echo quit | openssl s_client -connect 127.0.0.1:443 -tlsextdebug -status`
 
 ```
+echo quit | openssl s_client -connect 127.0.0.1:443 -tlsextdebug -status
 [...]
 OCSP resonse should look like that:
 ======================================
