@@ -174,8 +174,8 @@ for i in $(find $path -name '*.pem'); do
   debug "$cert_file"
   debug "$(ls -1 $split_file*)"
 
- rm -f $cert_file
- rm -f $split_file*
+  rm -f $cert_file
+  rm -f $split_file*
 
   if [ ! -z $logpath ]; then
     echo "$DATE:: OCSP file $ocsp_file was written." >> $logpath
