@@ -12,7 +12,7 @@ set -e
 typeset -i DEBUG=0
 DATE=`date +%y/%m/%d_%H:%M:%S`
 
-help() {
+function help() {
   echo -e 'Script to create and renew ocsp responses for HAproxy.\n'
   echo -e 'Usage: <haproxy_ocsp_updater -- <Path-to-HAProxy-Certificates>/'
   echo -e 'Options:\n\n-p, --path\t\t: Path to Haproxy certificate directory'
@@ -22,7 +22,7 @@ help() {
   exit 0
 }
 
-usage() {
+function usage() {
   echo "For help, use -h or --help"
 }
 
@@ -30,6 +30,17 @@ function debug() {
   if [ ${DEBUG} -eq 1 ]; then
       echo -e "${@}"
   fi
+}
+
+function certificate_subj() {
+  subject=$(openssl x509 -noout -subject -in ${@})
+
+  # If subject has empty spaces - remove them
+  if echo $subject | grep -q '\s=\s'; then
+    subject=$(echo $subject | sed 's/ = /=/g')
+  fi
+
+  echo $subject
 }
 
 for i in "$@"; do
@@ -89,6 +100,16 @@ for i in $(find $path -name '*.pem'); do
 
   debug "Create new PEM file with only certificates in it - without private key etc."
   sed '/BEGIN RSA PRIVATE KEY/,$d' $i >> $cert_file
+
+  # Get Common Name from own certificate subject in new PEM file inlcuding root, intermediate and own certificate
+  common_name=$(certificate_subj $cert_file | grep -o 'CN=.*$')
+
+  # Mask wildcard parameter
+  if echo $common_name | grep -q '\*'; then
+    common_name=$(echo $common_name | sed 's/*/\\*/g')
+  fi
+
+  # Split new PEM into different certificate files
   csplit -sz $cert_file '/.*BEGIN\ CERTIFICATE/' '{*}' --prefix $split_file
 
   count_ext_certs=$(ls -1 $split_file* | wc -l)
@@ -106,21 +127,8 @@ for i in $(find $path -name '*.pem'); do
 
     debug "Split certificate from $certificate_file is called $cert"
 
-    subject=$(openssl x509 -noout -subject -in $cert_file)
-
-    # If subject has empty spaces - remove them
-    if echo $subject | grep -q '\s=\s'; then
-      subject=$(echo $subject | sed 's/ = /=/g')
-    fi
-
-    common_name=$(echo $subject | grep -o 'CN=.*$')
-
-    # Mask wildcard parameter
-    if echo $common_name | grep -q '\*'; then
-      common_name=$(echo $common_name | sed 's/*/\\*/g')
-    fi
-
-    openssl x509 -noout -subject -in $cert | grep -qi "$common_name" || \
+    # Get subject from splitted certificate - Writes into .issuer file if CN is not equal to the CN from own certificate
+    certificate_subj $cert | grep -qi "$common_name" || \
     openssl x509 -in $cert -text -certopt no_header,no_pubkey,no_subject,no_issuer,no_signame,no_version,no_serial,no_validity,no_extensions,no_sigdump,no_aux,no_extensions \
     >> $issuer_cert
 
