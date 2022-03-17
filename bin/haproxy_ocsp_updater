@@ -1,0 +1,183 @@
+#!/bin/bash
+
+# Script needs following programs:
+# -realpath
+# -basename
+# -openssl
+
+# Interrupts the script if any program throws an error.
+# Prevents reloading HAproxy when something does not work.
+set -e
+
+typeset -i DEBUG=0
+DATE=`date +%y/%m/%d_%H:%M:%S`
+
+help() {
+  echo -e 'Script to create and renew ocsp responses for HAproxy.\n'
+  echo -e 'Usage: <haproxy_ocsp_updater -- <Path-to-HAProxy-Certificates>/'
+  echo -e 'Options:\n\n-p, --path\t\t: Path to Haproxy certificate directory'
+  echo -e '-d, --debug\t\t: Enable verbosely debug mode'
+  echo -e '-l, --logpath\t\t: Hand over absolute path where ocsp should be log into. Logfile will be created if not exists. Existing files will be appended.'
+  echo -e '-h, --help\t\t: Print this menu'
+  exit 0
+}
+
+usage() {
+  echo "For help, use -h or --help"
+}
+
+function debug() {
+  if [ ${DEBUG} -eq 1 ]; then
+      echo -e "${@}"
+  fi
+}
+
+for i in "$@"; do
+  shift
+  case "$i" in
+    "--path") 	set -- "$@" "-p" ;;
+    "--debug") 	set -- "$@" "-d" ;;
+    "--logpath") 	set -- "$@" "-l" ;;
+    "--help")		set -- "$@" "-h" ;;
+    *) 		       set -- "$@" "$i" ;;
+  esac
+done
+
+while getopts ":p: :d :l: :h" option; do
+  case $option in
+
+    p)  path="$(realpath ${OPTARG})"
+	      if [ ! -d "$path" ];
+          then echo -e "HAProxy certificate directory \e[4m$path\e[24m doesn't exist or is not a directory.\n"
+          exit 1
+        fi
+	      ;;
+    d)  DEBUG=1
+        ;;
+    l)  logpath="$(realpath ${OPTARG})"
+        if [ ! -f $logpath ]; then
+          touch $logpath
+        fi
+        ;;
+    h)  help
+        exit 1
+        ;;
+    *)  usage
+	      exit 1
+        ;;
+  esac
+done
+
+# test if no option has been passed
+if [ -z "$i" ]; then
+  help
+  exit 0
+fi
+
+cd /tmp
+
+debug "Change dir to /tmp"
+
+for i in $(find $path -name '*.pem'); do
+
+  file=$(basename $i)
+  cert_file=/tmp/.cert-$file
+  split_file=/tmp/.extracted_$file
+  issuer_cert=$path/$file.issuer
+  certificate_file=$path/$file
+  ocsp_file=$path/$file.ocsp
+
+  debug "Create new PEM file with only certificates in it - without private key etc."
+  sed '/BEGIN RSA PRIVATE KEY/,$d' $i >> $cert_file
+  csplit -sz $cert_file '/.*BEGIN\ CERTIFICATE/' '{*}' --prefix $split_file
+
+  count_ext_certs=$(ls -1 $split_file* | wc -l)
+  count_ext_certs=$(($count_ext_certs-1))
+
+  count=0
+
+  echo -n "" > $issuer_cert
+
+  debug "Extracting root and intermediate CA and write them into $issuer_cert"
+
+  while [ $count -le $count_ext_certs ]; do
+
+    cert=${split_file}0${count}
+
+    debug "Split certificate from $certificate_file is called $cert"
+
+    subject=$(openssl x509 -noout -subject -in $cert_file)
+
+    # If subject has empty spaces - remove them
+    if echo $subject | grep -q '\s=\s'; then
+      subject=$(echo $subject | sed 's/ = /=/g')
+    fi
+
+    common_name=$(echo $subject | grep -o 'CN=.*$')
+
+    # Mask wildcard parameter
+    if echo $common_name | grep -q '\*'; then
+      common_name=$(echo $common_name | sed 's/*/\\*/g')
+    fi
+
+    openssl x509 -noout -subject -in $cert | grep -qi "$common_name" || \
+    openssl x509 -in $cert -text -certopt no_header,no_pubkey,no_subject,no_issuer,no_signame,no_version,no_serial,no_validity,no_extensions,no_sigdump,no_aux,no_extensions \
+    >> $issuer_cert
+
+    let count=count+1
+
+  done
+
+  debug "Extracting OCSP URI from $certificate_file"
+  ocsp_uri=$(openssl x509 -noout -ocsp_uri -in $certificate_file)
+  debug "OCSP URI: $ocsp_uri"
+
+  host=$(echo $ocsp_uri | cut -d "/" -f3)
+  debug "Host: $host"
+
+  debug "Generating OCSP file called $ocsp_file\n"
+
+  openssl_version=$(openssl version | sed -rn 's/^OpenSSL\s([0-9]\.[0-9]).*/\1/p')
+
+  case $openssl_version in
+      '0.9')
+          header=("Host=$host")
+          ;;
+      '1.0')
+          header=("Host" "$host")
+          ;;
+      '1.1')
+          header=("Host=$host")
+          ;;
+      *)
+          header=("Host" "$host")
+          ;;
+  esac
+
+  ocsp_creation_command="openssl ocsp -issuer $issuer_cert -VAfile $issuer_cert -cert $certificate_file -url $ocsp_uri -header "${header[@]}" -no_nonce -respout $ocsp_file"
+
+  if [ $DEBUG -eq 1 ]; then
+    eval $ocsp_creation_command
+  else
+    eval "$ocsp_creation_command &>/dev/null"
+  fi
+
+  debug "\nRemoving temporary files:"
+  debug "$cert_file"
+  debug "$(ls -1 $split_file*)"
+
+  rm -f $cert_file
+  rm -f $split_file*
+
+  if [ ! -z $logpath ]; then
+    echo "$DATE:: OCSP file $ocsp_file was written." >> $logpath
+  fi
+
+done
+
+debug "\nReloading HAProxy service"
+#service haproxy reload
+
+if [ ! -z $logpath ]; then
+  echo "$DATE:: HAProxy service was reloaded after the script ran successfully" >> $logpath
+fi
